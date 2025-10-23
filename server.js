@@ -5,7 +5,6 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// API KEY que usarás desde cPanel
 const API_KEY = process.env.API_KEY || "gttherefast";
 
 app.get("/", (_req, res) => res.type("text/plain").send("OK /"));
@@ -29,15 +28,18 @@ app.post("/descargar", async (req, res) => {
     await page.goto("https://www.calidda.com.pe/atencion-al-cliente/descarga-tu-recibo", { waitUntil: "domcontentloaded" });
 
     async function setBySelectors(pos, val){
-      for(const sel of pos){ const loc=page.locator(sel); if(await loc.count()){ try{ await loc.first().fill(String(val)); return true; }catch{} } }
+      for (const sel of pos) {
+        const loc = page.locator(sel);
+        if (await loc.count()) { try { await loc.first().fill(String(val)); return true; } catch {} }
+      }
       return false;
     }
     async function selectByTextOrValue(sel, wanted){
-      const loc = page.locator(sel); if(!(await loc.count())) return false;
+      const loc = page.locator(sel); if (!(await loc.count())) return false;
       const opts = await loc.first().locator("option").all(); const up = s => (s||"").toUpperCase();
-      for(const o of opts){
+      for (const o of opts) {
         const v = up(await o.getAttribute("value")); const t = up(await o.innerText());
-        if (v===up(wanted) || t.includes(up(wanted))) {
+        if (v === up(wanted) || t.includes(up(wanted))) {
           await loc.first().selectOption({ value: await o.getAttribute("value") });
           return true;
         }
@@ -60,42 +62,58 @@ app.post("/descargar", async (req, res) => {
       return hasBtn || !!link;
     }, { timeout: 120000 });
 
+    // 🚫 NO usar Buffer dentro de evaluate. Usar Web APIs.
     const info = await page.evaluate(async () => {
+      // Convierte ArrayBuffer -> base64 usando btoa de forma segura por chunks
+      const abToBase64 = (ab) => {
+        const bytes = new Uint8Array(ab);
+        const chunk = 0x8000;
+        let binary = "";
+        for (let i = 0; i < bytes.length; i += chunk) {
+          const sub = bytes.subarray(i, i + chunk);
+          binary += String.fromCharCode.apply(null, sub);
+        }
+        return btoa(binary);
+      };
+
       const fetchPdf = async (url) => {
         const r = await fetch(url, { credentials: "include" });
-        if (!r.ok) throw new Error("HTTP "+r.status);
+        if (!r.ok) throw new Error("HTTP " + r.status);
         const buf = await r.arrayBuffer();
-        return Buffer.from(buf).toString("base64");
+        return abToBase64(buf);
       };
+
       let link = document.querySelector('a[href$=".pdf"], a[href*=".pdf"]');
       if (link) {
         const href = new URL(link.getAttribute("href"), location.href).href;
         const b64 = await fetchPdf(href);
-        return { ok:true, b64, name: href.split("/").pop() || "recibo.pdf" };
+        return { ok: true, b64, name: href.split("/").pop() || "recibo.pdf" };
       }
+
       const btn = [...document.querySelectorAll("a,button")].find(el => /descargar|pdf|ver recibo/i.test(el.textContent||""));
       if (btn) {
         const near = btn.closest("div,section,article,li")?.querySelector('a[href*=".pdf"]');
         if (near) {
           const href = new URL(near.getAttribute("href"), location.href).href;
           const b64 = await fetchPdf(href);
-          return { ok:true, b64, name: href.split("/").pop() || "recibo.pdf" };
+          return { ok: true, b64, name: href.split("/").pop() || "recibo.pdf" };
         }
-        btn.click(); await new Promise(r => setTimeout(r,2000));
+        btn.click(); await new Promise(r => setTimeout(r, 2000));
         const later = document.querySelector('a[href*=".pdf"]');
         if (later) {
           const href = new URL(later.getAttribute("href"), location.href).href;
           const b64 = await fetchPdf(href);
-          return { ok:true, b64, name: href.split("/").pop() || "recibo.pdf" };
+          return { ok: true, b64, name: href.split("/").pop() || "recibo.pdf" };
         }
       }
-      return { ok:false, error:"No encontré enlace de PDF" };
+      return { ok: false, error: "No encontré enlace de PDF" };
     });
 
     await browser.close();
 
     if (!info.ok) return res.status(500).send(info.error || "Error");
 
+    // Aquí sí usamos Buffer (en Node)
     const pdf = Buffer.from(info.b64, "base64");
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${info.name}"`);
