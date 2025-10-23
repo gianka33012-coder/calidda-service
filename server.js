@@ -6,7 +6,7 @@ app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 // ====== CONFIG ======
-const API_KEY = process.env.API_KEY || "gttherefast"; // cámbiala si quieres
+const API_KEY = process.env.API_KEY || "gttherefast"; // pon la misma que uses en index.php
 const ORIGIN_ALLOW = null;   // p.ej. "https://yefany.repuestosdiaz.store"; null = sin restricción
 const DEBUG = process.env.DEBUG === "1";
 // ====================
@@ -19,9 +19,11 @@ app.get("/descargar", (_req, res) =>
 );
 
 app.post("/descargar", async (req, res) => {
+  // API key por header o por body
   const providedKey = (req.headers["x-api-key"] || req.body?.api_key || "").toString();
   if (providedKey !== API_KEY) return res.status(401).send("Unauthorized");
 
+  // (Opcional) Restringir por origen
   if (ORIGIN_ALLOW) {
     const origin = (req.headers.origin || req.headers.referer || "").toString();
     if (!origin.startsWith(ORIGIN_ALLOW)) return res.status(403).send("Forbidden origin");
@@ -66,17 +68,18 @@ app.post("/descargar", async (req, res) => {
       { waitUntil: "domcontentloaded" }
     );
 
-    // 2) Detección temprana de CAPTCHA
-    const captchaSelectors = [
+    // 2) Detección temprana de CAPTCHA (FIX: separar CSS de selector de texto)
+    const captchaCss = [
       'iframe[src*="recaptcha"]',
       '.g-recaptcha',
       'iframe[src*="hcaptcha"]',
       '.h-captcha',
-      '[data-sitekey]',
-      'text=/no soy un robot/i'
-    ];
-    const captchaCount = await page.locator(captchaSelectors.join(",")).count();
-    if (captchaCount) {
+      '[data-sitekey]'
+    ].join(', ');
+    const captchaWidgets = await page.locator(captchaCss).count();
+    const captchaText = await page.locator('text=/no soy un robot/i').count();
+
+    if (captchaWidgets > 0 || captchaText > 0) {
       await browser.close();
       return res
         .status(409)
