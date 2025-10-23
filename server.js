@@ -9,258 +9,193 @@ const API_KEY = process.env.API_KEY || "gttherefast";
 
 app.get("/", (_req, res) => res.type("text/plain").send("OK /"));
 app.get("/status", (_req, res) => res.json({ ok: true }));
-app.get("/descargar", (_req, res) =>
-  res.status(405).type("text/plain").send("Usa POST /descargar")
-);
+app.get("/descargar", (_req, res) => res.status(405).type("text/plain").send("Usa POST /descargar"));
 
 app.post("/descargar", async (req, res) => {
-  try {
-    // Seguridad
-    if ((req.headers["x-api-key"] || "") !== API_KEY) {
-      return res.status(401).send("Unauthorized");
-    }
+  if ((req.headers["x-api-key"] || "") !== API_KEY) return res.status(401).send("Unauthorized");
 
-    const { numero_cliente, tipo_doc = "DNI", numero_doc, anio, mes } = req.body || {};
-    if (!numero_cliente || !numero_doc) {
-      return res.status(400).send("Faltan datos: numero_cliente y numero_doc");
-    }
+  const { numero_cliente, tipo_doc = "DNI", numero_doc, anio, mes } = req.body || {};
+  if (!numero_cliente || !numero_doc) return res.status(400).send("Faltan datos: numero_cliente y numero_doc");
 
-    const browser = await chromium.launch({
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--no-zygote",
-        "--single-process",
-      ],
-    });
-    const ctx = await browser.newContext({ acceptDownloads: true });
-    const page = await ctx.newPage();
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox","--disable-dev-shm-usage","--disable-gpu","--no-zygote","--single-process"]
+  });
 
-    // --- Sniffer de PDFs por si el sitio responde con PDF vía XHR/fetch ---
-    let sniffedPdf = null;
-    let sniffedName = "recibo.pdf";
-    page.on("response", async (resp) => {
-      try {
-        const ct = resp.headers()["content-type"] || "";
-        if (ct.includes("application/pdf") && !sniffedPdf) {
-          const url = resp.url();
-          const body = await resp.body();
-          sniffedPdf = Buffer.from(body);
-          const tail = url.split("/").pop() || "";
-          if (tail.toLowerCase().endsWith(".pdf")) sniffedName = tail;
-        }
-      } catch {}
-    });
+  const ctx = await browser.newContext({ acceptDownloads: true });
+  const page = await ctx.newPage();
 
-    // Ir a la página
-    await page.goto(
-      "https://www.calidda.com.pe/atencion-al-cliente/descarga-tu-recibo",
-      { waitUntil: "domcontentloaded" }
-    );
+  // 1) Ir a la página
+  await page.goto("https://www.calidda.com.pe/atencion-al-cliente/descarga-tu-recibo", { waitUntil: "domcontentloaded" });
 
-    // Helpers cortitos
-    async function setBySelectors(pos, val) {
-      for (const sel of pos) {
-        const loc = page.locator(sel);
-        if (await loc.count()) {
-          try {
-            await loc.first().fill(String(val));
-            return true;
-          } catch {}
-        }
-      }
-      return false;
-    }
-    async function selectByTextOrValue(sel, wanted) {
+  // Helpers
+  const up = s => (s || "").toUpperCase();
+  async function setBySelectors(pos, val){
+    for (const sel of pos) {
       const loc = page.locator(sel);
-      if (!(await loc.count())) return false;
-      const opts = await loc.first().locator("option").all();
-      const up = (s) => (s || "").toUpperCase();
-      for (const o of opts) {
-        const v = up(await o.getAttribute("value"));
-        const t = up(await o.innerText());
-        if (v === up(wanted) || t.includes(up(wanted))) {
-          await loc.first().selectOption({ value: await o.getAttribute("value") });
-          return true;
-        }
+      if (await loc.count()) { try { await loc.first().fill(String(val)); return true; } catch {} }
+    }
+    return false;
+  }
+  async function selectByTextOrValue(sel, wanted){
+    const loc = page.locator(sel);
+    if (!(await loc.count())) return false;
+    const opts = await loc.first().locator("option").all();
+    for (const o of opts) {
+      const v = up(await o.getAttribute("value"));
+      const t = up(await o.innerText());
+      if (v === up(wanted) || t.includes(up(wanted))) {
+        await loc.first().selectOption({ value: await o.getAttribute("value") });
+        return true;
       }
-      return false;
     }
+    return false;
+  }
 
-    // Completar formulario con múltiples variantes de nombres
-    await setBySelectors(
-      [
-        'input[name="numeroCliente"]',
-        'input[name="numCliente"]',
-        'input[name="nroCliente"]',
-        'input[name="numero_cliente"]',
-        'input[placeholder*="cliente" i]',
-        'input[placeholder*="suministro" i]',
-      ],
-      numero_cliente
-    );
+  // 2) Completar formulario
+  await setBySelectors([
+    'input[name="numeroCliente"]','input[name="numCliente"]','input[name="nroCliente"]',
+    'input[name="numero_cliente"]','input[placeholder*="cliente" i]','input[placeholder*="suministro" i]'
+  ], numero_cliente);
 
-    await selectByTextOrValue(
-      'select[name="tipoDocumento"], select[name="tipo_doc"], select',
-      tipo_doc
-    );
+  await selectByTextOrValue('select[name="tipoDocumento"], select[name="tipo_doc"], select', tipo_doc);
 
-    await setBySelectors(
-      [
-        'input[name="numeroDocumento"]',
-        'input[name="nroDocumento"]',
-        'input[name="numero_doc"]',
-        'input[name="documento"]',
-        'input[placeholder*="documento" i]',
-      ],
-      numero_doc
-    );
+  await setBySelectors([
+    'input[name="numeroDocumento"]','input[name="nroDocumento"]','input[name="numero_doc"]',
+    'input[name="documento"]','input[placeholder*="documento" i]'
+  ], numero_doc);
 
-    if (anio) await selectByTextOrValue('select[name="anio"], select[name="year"]', anio);
-    if (mes)
-      await selectByTextOrValue(
-        'select[name="mes"], select[name="month"]',
-        String(mes).padStart(2, "0")
-      );
+  if (anio) await selectByTextOrValue('select[name="anio"], select[name="year"]', anio);
+  if (mes)  await selectByTextOrValue('select[name="mes"], select[name="month"]', String(mes).padStart(2,"0"));
 
-    // Botón de consulta
-    const btnConsultar = page.locator(
-      [
-        'button:has-text("Consultar")',
-        'button:has-text("Buscar")',
-        'a:has-text("Consultar")',
-        'a:has-text("Buscar")',
-        'button[type="submit"]',
-        'input[type="submit"]',
-      ].join(", ")
-    );
-    if (await btnConsultar.count()) {
-      await Promise.all([page.waitForLoadState("networkidle"), btnConsultar.first().click()]);
-    }
+  // 3) Consultar
+  const btnConsultar = page.locator([
+    'button:has-text("Consultar")','button:has-text("Buscar")','a:has-text("Consultar")',
+    'a:has-text("Buscar")','button[type="submit"]','input[type="submit"]'
+  ].join(", "));
+  if (await btnConsultar.count()) {
+    await Promise.all([page.waitForLoadState("networkidle"), btnConsultar.first().click()]);
+  }
 
-    // Esperar a que aparezcan resultados que contengan acciones de "Descargar / PDF / Ver recibo"
-    await page.waitForFunction(
-      () => {
-        const txt = (el) => (el.textContent || "").toLowerCase();
-        return (
-          [...document.querySelectorAll("a,button")].some((el) =>
-            /descargar|pdf|ver\s*recibo|descarga/i.test(txt(el))
-          ) ||
-          !!document.querySelector('a[href$=".pdf"], a[href*=".pdf"]')
-        );
-      },
-      { timeout: 120000 }
-    );
+  // 4) Esperar resultados y localizar la FILA/TARJETA que contenga el número de cliente
+  const numeroBuscado = numero_cliente.trim();
+  await page.waitForFunction((num) => {
+    const txt = n => (n.textContent || "").toUpperCase();
+    const nodes = document.querySelectorAll("tr, .card, .resultado, .result, .row, li, article, section, .list-item");
+    return [...nodes].some(n => txt(n).includes(num.toUpperCase()));
+  }, numeroBuscado, { timeout: 120000 });
 
-    // --- Estrategia A: evento de descarga nativo ---
-    const downloadPromise = page.waitForEvent("download", { timeout: 120000 }).catch(() => null);
+  // Elegir el contenedor correcto (la primera coincidencia con el número)
+  const contenedor = page.locator('tr, .card, .resultado, .result, .row, li, article, section, .list-item')
+                         .filter({ hasText: numeroBuscado }).first();
 
-    // Intentar clicks en botones/enlaces de descarga (varias variantes)
-    const candidates = page.locator(
-      [
-        'a:has-text("Descargar")',
-        'button:has-text("Descargar")',
-        'a:has-text("PDF")',
-        'button:has-text("PDF")',
-        'a:has-text("Ver recibo")',
-        'button:has-text("Ver recibo")',
-        'a[href$=".pdf"]',
-        'a[href*=".pdf"]',
-      ].join(", ")
-    );
-    const count = await candidates.count();
-    for (let i = 0; i < Math.min(count, 6); i++) {
-      try {
-        await candidates.nth(i).click({ force: true });
-        // dar chance a que dispare download
-        await page.waitForTimeout(1500);
-      } catch {}
-    }
-
-    const download = await downloadPromise;
-
-    if (download) {
-      // ¡Descarga nativa capturada!
-      const suggested = download.suggestedFilename() || "recibo.pdf";
-      const stream = await download.createReadStream();
-      if (stream) {
-        res.setHeader("Content-Type", "application/pdf");
-        res.setHeader("Content-Disposition", `attachment; filename="${suggested}"`);
-        // stream -> response
-        stream.pipe(res);
-        await stream.on("end", async () => {
-          try { await browser.close(); } catch {}
-        });
-        return;
+  // Si ese contenedor está dentro de un iframe, moverse al frame
+  let scope = page;
+  const frame = await contenedor.frameLocator?.() ?? null; // compat
+  try {
+    // Si el elemento vive en un frame, localizar el frame real con hasText
+    const frames = page.frames();
+    for (const f of frames) {
+      if (await f.locator('body').innerText().catch(()=>'')) {
+        const has = await f.evaluate((num) =>
+          [...document.querySelectorAll("tr, .card, .resultado, .result, .row, li, article, section, .list-item")]
+            .some(n => (n.textContent||"").toUpperCase().includes(num.toUpperCase())),
+          numeroBuscado
+        ).catch(()=>false);
+        if (has) { scope = f; break; }
       }
-      // fallback si no hay stream (muy raro): guardar y leer
-      const tmpPath = `/tmp/${Date.now()}_${suggested}`;
-      await download.saveAs(tmpPath);
-      const fs = await import("fs");
-      const buf = fs.readFileSync(tmpPath);
+    }
+  } catch {}
+
+  // 5) Dentro del contenedor correcto, buscar el botón/enlace de descarga
+  const descargarEnContenedor = scope.locator([
+    // dentro de la fila/tarjeta que contiene el número de cliente
+    `:scope >> xpath=.//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'),'descargar') and (self::a or self::button)]`,
+    `:scope >> xpath=.//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'),'ver recibo') and (self::a or self::button)]`,
+    `:scope >> css=a[href$=".pdf"]`,
+    `:scope >> css=a[href*=".pdf"]`
+  ].join(", ")).filter({ hasText: /(descargar|recibo|pdf)/i }).first();
+
+  // 6) Capturar descarga nativa
+  const downloadPromise = scope.waitForEvent("download", { timeout: 120000 }).catch(() => null);
+
+  // 7) Click en el botón/enlace DENTRO del contenedor que corresponde al número
+  let clicked = false;
+  if (await descargarEnContenedor.count()) {
+    await descargarEnContenedor.click({ force: true });
+    clicked = true;
+  }
+
+  // Si no había botón claro, como último recurso prueba el primer enlace .pdf dentro del contenedor
+  if (!clicked) {
+    const pdfLink = scope.locator(`:scope >> xpath=.//a[contains(@href,'.pdf')]`).first();
+    if (await pdfLink.count()) {
+      await pdfLink.click({ force: true });
+      clicked = true;
+    }
+  }
+
+  // 8) Si no se pudo clickear nada específico, error
+  if (!clicked) {
+    await browser.close();
+    return res.status(404).send("No se encontró el botón/enlace de descarga en la fila del cliente.");
+  }
+
+  // 9) Esperar la descarga
+  const download = await downloadPromise;
+
+  // Si hubo descarga nativa, entregar ese PDF
+  if (download) {
+    const suggested = download.suggestedFilename() || `recibo_${numeroBuscado}.pdf`;
+    const stream = await download.createReadStream();
+    if (stream) {
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `attachment; filename="${suggested}"`);
-      res.send(buf);
+      stream.pipe(res);
+      await new Promise(r => stream.on("end", r));
       await browser.close();
       return;
     }
-
-    // --- Estrategia B: PDF detectado por el sniffer de respuestas ---
-    if (sniffedPdf) {
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `attachment; filename="${sniffedName}"`);
-      res.send(sniffedPdf);
-      await browser.close();
-      return;
-    }
-
-    // --- Estrategia C (último recurso): buscar enlace PDF y hacer fetch en el navegador ---
-    const info = await page.evaluate(async () => {
-      const abToBase64 = (ab) => {
-        const bytes = new Uint8Array(ab);
-        const chunk = 0x8000;
-        let binary = "";
-        for (let i = 0; i < bytes.length; i += chunk) {
-          const sub = bytes.subarray(i, i + chunk);
-          binary += String.fromCharCode.apply(null, sub);
-        }
-        return btoa(binary);
-      };
-      const fetchPdf = async (url) => {
-        const r = await fetch(url, { credentials: "include" });
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        const buf = await r.arrayBuffer();
-        return abToBase64(buf);
-      };
-      // Priorizar enlaces cercanos a “recibo / factura / descargar”
-      const links = Array.from(document.querySelectorAll('a[href*=".pdf"]'));
-      const preferred = links.find((a) =>
-        /recibo|factura|descarg/i.test((a.textContent || "") + " " + (a.getAttribute("href") || ""))
-      );
-      const pick = preferred || links[0];
-      if (pick) {
-        const href = new URL(pick.getAttribute("href"), location.href).href;
-        const b64 = await fetchPdf(href);
-        return { ok: true, b64, name: href.split("/").pop() || "recibo.pdf" };
-      }
-      return { ok: false };
-    });
-
+    const tmpPath = `/tmp/${Date.now()}_${suggested}`;
+    await download.saveAs(tmpPath);
+    const fs = await import("fs");
+    const buf = fs.readFileSync(tmpPath);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${suggested}"`);
+    res.send(buf);
     await browser.close();
-
-    if (info?.ok) {
-      const pdf = Buffer.from(info.b64, "base64");
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `attachment; filename="${info.name}"`);
-      return res.send(pdf);
-    }
-
-    return res.status(404).send("No se encontró el enlace real de descarga del recibo.");
-  } catch (e) {
-    return res.status(500).send("Error: " + (e?.message || e));
+    return;
   }
+
+  // 10) Si no hubo evento de descarga (algunos sitios abren PDF en la misma pestaña o XHR),
+  //     interceptar respuestas PDF posteriores al click
+  let fallbackPdf = null, fallbackName = `recibo_${numeroBuscado}.pdf`;
+  page.on("response", async (resp) => {
+    try {
+      const ct = resp.headers()["content-type"] || "";
+      if (ct.includes("application/pdf") && !fallbackPdf) {
+        const url = resp.url();
+        const body = await resp.body();
+        fallbackPdf = Buffer.from(body);
+        const tail = url.split("/").pop() || "";
+        if (tail.toLowerCase().endsWith(".pdf")) fallbackName = tail;
+      }
+    } catch {}
+  });
+
+  // Espera breve por si la respuesta llega como XHR/fetch
+  await scope.waitForTimeout(3500);
+
+  if (fallbackPdf) {
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${fallbackName}"`);
+    res.send(fallbackPdf);
+    await browser.close();
+    return;
+  }
+
+  await browser.close();
+  return res.status(404).send("No se pudo capturar el PDF del recibo (descarga o respuesta PDF no detectadas).");
 });
 
 const port = process.env.PORT || 8080;
