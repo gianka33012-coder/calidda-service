@@ -1,16 +1,20 @@
-FROM mcr.microsoft.com/playwright:v1.48.0-jammy
+# Imagen oficial de Playwright que YA trae Chromium y dependencias del sistema
+FROM mcr.microsoft.com/playwright:v1.56.1-jammy
 
+# Carpeta de trabajo
 WORKDIR /app
 
-# Copiamos package.json (no usamos npm ci porque no hay package-lock.json)
+# Instalar dependencias de Node (sin dev)
 COPY package*.json ./
 RUN npm install --omit=dev
 
-# Copiamos el servidor
+# Copiar el servidor
 COPY server.js ./
 
-# Puerto en Render
+# Variables y puerto expuesto
+ENV NODE_ENV=production
 ENV PORT=8080
 EXPOSE 8080
 
+# Comando de arranque
 CMD ["node", "server.js"]
