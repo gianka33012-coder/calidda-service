@@ -5,11 +5,11 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// === CONFIG ===
-const API_KEY = process.env.API_KEY || "gttherefast";
-const ORIGIN_ALLOW = null; // p.ej. "https://yefany.repuestosdiaz.store" para restringir origen; null = desactivado
-const DEBUG = process.env.DEBUG === "1"; // si 1, guarda screenshot y HTML de error en /tmp
-// =============
+// ====== CONFIG ======
+const API_KEY = process.env.API_KEY || "gttherefast"; // cámbiala si quieres
+const ORIGIN_ALLOW = null;   // p.ej. "https://yefany.repuestosdiaz.store"; null = sin restricción
+const DEBUG = process.env.DEBUG === "1";
+// ====================
 
 app.get("/", (_req, res) => res.type("text/plain").send("OK /"));
 app.get("/status", (_req, res) => res.json({ ok: true }));
@@ -51,11 +51,60 @@ app.post("/descargar", async (req, res) => {
 
     const page = await ctx.newPage();
 
-    // 1) Ir a Cálidda
+    // Evitar popups: navegar en la misma pestaña
+    await page.addInitScript(() => {
+      const _open = window.open;
+      window.open = function (url) {
+        try { if (url) location.href = url; } catch {}
+        return null;
+      };
+    });
+
+    // 1) Ir a la web oficial
     await page.goto(
       "https://www.calidda.com.pe/atencion-al-cliente/descarga-tu-recibo",
       { waitUntil: "domcontentloaded" }
     );
+
+    // 2) Detección temprana de CAPTCHA
+    const captchaSelectors = [
+      'iframe[src*="recaptcha"]',
+      '.g-recaptcha',
+      'iframe[src*="hcaptcha"]',
+      '.h-captcha',
+      '[data-sitekey]',
+      'text=/no soy un robot/i'
+    ];
+    const captchaCount = await page.locator(captchaSelectors.join(",")).count();
+    if (captchaCount) {
+      await browser.close();
+      return res
+        .status(409)
+        .type("text/html")
+        .send(`
+          <meta charset="utf-8">
+          <style>
+            body{font-family:system-ui,Segoe UI,Roboto,Arial;padding:28px;color:#222}
+            .box{max-width:720px;margin:auto;border:1px solid #e5e7eb;border-radius:12px;padding:20px}
+            a.btn{display:inline-block;margin-top:8px;background:#1c7ed6;color:#fff;text-decoration:none;padding:12px 16px;border-radius:10px}
+            code{background:#f3f4f6;padding:2px 6px;border-radius:6px}
+          </style>
+          <div class="box">
+            <h2>Necesitas resolver un CAPTCHA en Cálidda</h2>
+            <p>Por seguridad, Cálidda está pidiendo un CAPTCHA. No puedo automatizarlo.</p>
+            <p>Haz clic para abrir la página oficial, completa el desafío y descarga tu recibo:</p>
+            <p><a class="btn" target="_blank" href="https://www.calidda.com.pe/atencion-al-cliente/descarga-tu-recibo">Abrir página de Cálidda</a></p>
+            <hr>
+            <p><strong>Datos que ingresaste</strong></p>
+            <ul>
+              <li>N° cliente: <code>${numero_cliente}</code></li>
+              <li>Tipo doc: <code>${tipo_doc}</code></li>
+              <li>N° doc: <code>${numero_doc}</code></li>
+              <li>Año/Mes: <code>${anio || "-"}/${mes || "-"}</code></li>
+            </ul>
+          </div>
+        `);
+    }
 
     // Helpers
     async function setBySelectors(posibles, val) {
@@ -82,34 +131,55 @@ app.post("/descargar", async (req, res) => {
       }
       return false;
     }
-    async function findAndClickAny(scope, selectors) {
-      const loc = scope.locator(selectors.join(", "));
-      if (await loc.count()) { await loc.first().click({ force: true }); return true; }
-      return false;
+    async function removeTargets() {
+      try {
+        await page.evaluate(() => {
+          document.querySelectorAll('a[target="_blank"]').forEach(a => a.removeAttribute('target'));
+        });
+      } catch {}
     }
-    async function pollForDownloadButtons(scope, ms = 45000) {
+    async function findPdfHref(scope) {
+      const href = await scope.evaluate(() => {
+        function abs(u) { try { return new URL(u, location.href).href; } catch { return null; } }
+        const links = Array.from(document.querySelectorAll('a[href*=".pdf"]'));
+        for (const a of links) {
+          const h = a.getAttribute("href") || "";
+          if (/\.pdf(\b|$)/i.test(h)) {
+            const full = abs(h);
+            if (full) return full;
+          }
+        }
+        return null;
+      });
+      return href;
+    }
+    async function tryDownloadViaHref(absUrl) {
+      try {
+        const resp = await ctx.request.get(absUrl, { timeout: 120000 });
+        const ct = resp.headers()["content-type"] || "";
+        const buf = await resp.body();
+        if (ct.includes("application/pdf") || (absUrl || "").toLowerCase().endsWith(".pdf")) {
+          return { ok: true, name: (absUrl.split("/").pop() || "recibo.pdf"), buf };
+        }
+      } catch {}
+      return { ok: false };
+    }
+    async function pollAndDownloadByHref(scope, ms = 45000) {
       const start = Date.now();
-      const sels = [
-        'a[href$=".pdf"]',
-        'a[href*=".pdf"]',
-        'a:has-text("Descargar")',
-        'a:has-text("PDF")',
-        'a:has-text("Recibo")',
-        'button:has-text("Descargar")',
-        'button:has-text("PDF")',
-        'button:has-text("Recibo")',
-      ];
       while (Date.now() - start < ms) {
-        const ok = await findAndClickAny(scope, sels);
-        if (ok) return true;
+        await removeTargets();
+        const href = await findPdfHref(scope);
+        if (href) {
+          const r = await tryDownloadViaHref(href);
+          if (r.ok) return r;
+        }
         await scope.waitForTimeout(1000);
-        // intenta revelar contenido
         try { await scope.evaluate(() => window.scrollTo(0, document.body.scrollHeight)); } catch {}
       }
-      return false;
+      return { ok: false };
     }
 
-    // 2) Completar formulario
+    // 3) Completar formulario
     await setBySelectors([
       'input[name="numeroCliente"]','input[name="numCliente"]','input[name="nroCliente"]',
       'input[name="numero_cliente"]','input[placeholder*="cliente" i]','input[placeholder*="suministro" i]'
@@ -125,7 +195,7 @@ app.post("/descargar", async (req, res) => {
     if (anio) await selectByTextOrValue('select[name="anio"], select[name="year"]', anio);
     if (mes)  await selectByTextOrValue('select[name="mes"], select[name="month"]', String(mes).padStart(2,"0"));
 
-    // 3) Preparar capturas en paralelo
+    // 4) Preparar capturas paralelas
     const downloadPromise = page.waitForEvent("download", { timeout: 120000 }).catch(() => null);
 
     let sniffedPdf = null, sniffedName = "recibo.pdf";
@@ -142,21 +212,49 @@ app.post("/descargar", async (req, res) => {
       } catch {}
     });
 
-    // 4) Click en "Consultar" o "Buscar"
-    await findAndClickAny(page, [
+    let popupPage = null;
+    page.on("popup", p => { popupPage = p; });
+
+    // 5) Click en "Consultar/Buscar"
+    await removeTargets();
+    const consultSelectors = [
       'button:has-text("Consultar")','button:has-text("Buscar")',
       'a:has-text("Consultar")','a:has-text("Buscar")',
       'button[type="submit"]','input[type="submit"]'
-    ]);
+    ];
+    for (const sel of consultSelectors) {
+      const loc = page.locator(sel);
+      if (await loc.count()) { await loc.first().click({ force: true }); break; }
+    }
     await page.waitForLoadState("networkidle").catch(()=>{});
 
-    // 5) Si el sitio ya dispara la descarga, bien; si no, buscar botones/enlaces de descarga globalmente (polling)
-    //    No dependemos de ver el número de cliente en la UI.
-    const clicked = await pollForDownloadButtons(page, 45000);
+    // 6) PRIORIDAD 1: href .pdf vía request
+    let r = await pollAndDownloadByHref(page, 45000);
+    if (r.ok) {
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${r.name || ("recibo_"+numero_cliente+".pdf")}"`);
+      res.send(r.buf);
+      await browser.close();
+      return;
+    }
 
-    // 6) Resolver las tres vías de obtención de PDF
+    // 7) PRIORIDAD 2: si hubo popup, buscar ahí
+    if (popupPage) {
+      try {
+        await popupPage.waitForLoadState("domcontentloaded", { timeout: 20000 }).catch(()=>{});
+        const r2 = await pollAndDownloadByHref(popupPage, 25000);
+        if (r2.ok) {
+          res.setHeader("Content-Type", "application/pdf");
+          res.setHeader("Content-Disposition", `attachment; filename="${r2.name || ("recibo_"+numero_cliente+".pdf")}"`);
+          res.send(r2.buf);
+          await browser.close();
+          return;
+        }
+      } catch {}
+    }
+
+    // 8) PRIORIDAD 3: descarga nativa
     const download = await downloadPromise;
-
     if (download) {
       const name = download.suggestedFilename() || `recibo_${numero_cliente}.pdf`;
       const stream = await download.createReadStream();
@@ -164,7 +262,7 @@ app.post("/descargar", async (req, res) => {
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `attachment; filename="${name}"`);
         stream.pipe(res);
-        await new Promise(r => stream.on("end", r));
+        await new Promise(r3 => stream.on("end", r3));
         await browser.close();
         return;
       }
@@ -179,6 +277,7 @@ app.post("/descargar", async (req, res) => {
       return;
     }
 
+    // 9) PRIORIDAD 4: sniffer
     if (sniffedPdf) {
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `attachment; filename="${sniffedName}"`);
@@ -187,20 +286,20 @@ app.post("/descargar", async (req, res) => {
       return;
     }
 
-    // 7) Modo debug: dump de página si no se encontró nada
+    // Debug
     if (DEBUG) {
       const fs = await import("fs");
       const ts = Date.now();
       try { await page.screenshot({ path: `/tmp/fail_${ts}.png`, fullPage: true }); } catch {}
-      try { const html = await page.content(); fs.writeFileSync(`/tmp/fail_${ts}.html`, html); } catch {}
+      try { fs.writeFileSync(`/tmp/fail_${ts}.html`, await page.content()); } catch {}
+      if (popupPage) {
+        try { await popupPage.screenshot({ path: `/tmp/fail_popup_${ts}.png`, fullPage: true }); } catch {}
+        try { fs.writeFileSync(`/tmp/fail_popup_${ts}.html`, await popupPage.content()); } catch {}
+      }
     }
 
     await browser.close();
-    res.status(404).send(
-      clicked
-        ? "Se hizo clic en un botón de descarga pero no se pudo capturar el PDF (descarga en nueva pestaña o bloqueada)."
-        : "No se encontró ningún botón/enlace de descarga tras consultar."
-    );
+    res.status(404).send("No se pudo capturar el PDF (sin enlace .pdf, sin download, sin respuesta PDF).");
 
   } catch (e) {
     if (DEBUG) {
