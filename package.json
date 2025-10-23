@@ -7,7 +7,6 @@
     "playwright": "^1.48.0"
   },
   "scripts": {
-    "postinstall": "npx playwright install --with-deps chromium",
     "start": "node server.js"
   }
 }
